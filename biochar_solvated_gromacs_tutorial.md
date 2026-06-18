@@ -295,7 +295,7 @@ import MDAnalysis as mda
 import numpy as np
 
 u = mda.Universe("npt.tpr", "npt.xtc")
-biochar = u.select_atoms("resname BC400")
+biochar = u.select_atoms("resname 4G12") # BC400 residue name
 solute = u.select_atoms("resname DCPAA")  # 2,4-D residue name
 external = u.select_atoms("resname SOL DCPAA NA CL")
 
