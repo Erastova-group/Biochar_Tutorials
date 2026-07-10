@@ -30,7 +30,7 @@ These simulations are heavy, so access to a High-Performance computing resource 
 
 **Software:**
 - GROMACS 2022 or newer (the published simulations used GROMACS 2022 onwards)
-- Python 3 with MDAnalysis and Matplotlib (for analysis, later)
+- Python 3 with MDAnalysis, [pytim](https://marcello-sega.github.io/pytim/), and Matplotlib (for analysis, later)
 - VMD (for visualisation, optional but strongly recommended)
 - A text editor
 
@@ -286,52 +286,128 @@ Select each group in turn when prompted (biochar, solute, water, ions). Plot the
 
 If you see a roughly uniform distribution of solute throughout the box without enrichment near the surface, either adsorption is not occurring (which may be physically reasonable for some systems) or the simulation has not equilibrated.
 
+
 ### Counting adsorbed molecules
 
-To quantify adsorption more precisely, count the number of solute molecules whose centre of mass lies within a defined distance of the biochar surface. For a slab model, do not measure this distance from the centre of mass of the whole biochar: that would point to the middle of the slab, not to either interface. Instead, identify the two biochar surfaces from the biochar atoms closest to the external phase (water, solute, and ions), then measure the solute centre of mass from the nearest surface. In our 2,4-D work, 0.6 nm from the surface was used as this cutoff — corresponding to the first peak in the radial distribution function between the solute's aromatic ring and surface carbon atoms. This can be done with MDAnalysis in Python:
+To quantify adsorption, count how many solute molecules lie within a defined distance of the biochar surface. The surface itself must be identified carefully: for a slab model, measuring distance from the centre of mass of the whole biochar points to the middle of the slab, not to either interface, and approximating the surface as a single z-plane ignores surface roughness and functional groups.
+
+We use **[pytim](https://marcello-sega.github.io/pytim/) ITIM** (Identification of Truly Interfacial Molecules) to locate biochar atoms at the solvent interface, then measure the minimum distance from each solute molecule's centre of mass (COM) to the nearest ITIM surface atom. In our 2,4-D work, a molecule is counted as adsorbed if this distance is below **0.6 nm** — corresponding to the first peak in the radial distribution function between the solute's aromatic ring and surface carbon atoms. The same workflow is used in our more recent atrazine adsorption analysis.
+
+The analysis has two steps: (1) identify surface atoms with ITIM, (2) count adsorbed solute molecules frame by frame.
+
+#### Step 1 — Identify biochar surface atoms with pytim ITIM
+
+ITIM rolls a probe sphere (radius `alpha`) over the biochar atoms and labels those in the outermost solvent-facing layer. Hydrogen needs an explicit van der Waals radius — pytim's default gives hydrogen zero radius and would exclude most surface H atoms.
 
 ```python
 import MDAnalysis as mda
 import numpy as np
+import pytim
+from MDAnalysis.lib import distances
 
-u = mda.Universe("npt.tpr", "npt.xtc")
-biochar = u.select_atoms("resname 4G12") # BC400 residue name
-solute = u.select_atoms("resname DCPAA")  # 2,4-D residue name
-external = u.select_atoms("resname SOL DCPAA NA CL")
+STRUCTURE = "npt.tpr"          # or a solvated .gro from the equilibrated run
+TRAJECTORY = "npt.xtc"
+BIOCHAR_SELECTION = "resname 4G12"   # BC400; use "resname ?G*" for any biochar model
 
-nm_to_angstrom = 10.0
-surface_contact_cutoff = 0.35 * nm_to_angstrom
-adsorption_cutoff = 0.6 * nm_to_angstrom
+# ITIM probe radius (Angstrom) and layer to keep as "surface"
+PYTIM_ALPHA = 1.3
+SURFACE_LAYER = 1
+BIOCHAR_RADII = {"C": 1.70, "O": 1.52, "H": 1.20}  # Angstrom; required for surface H
 
-adsorbed_counts = []
-for ts in u.trajectory[1500:]:  # from frame 1500 (= 30 ns at 20 ps intervals)
-    com_solute = solute.center_of_mass(compound='residues')
+u = mda.Universe(STRUCTURE, TRAJECTORY)
+biochar = u.select_atoms(BIOCHAR_SELECTION)
 
-    # Surface atoms are the biochar atoms nearest to the surrounding solution.
-    contact_biochar = biochar.select_atoms(f"around {surface_contact_cutoff} group external",
-                                           external=external)
-    if contact_biochar.n_atoms == 0:
-        raise ValueError("No biochar surface atoms found; check selections and cutoff.")
+def run_itim(universe, biochar_ag):
+    pytim.ITIM(
+        universe, biochar_ag,
+        alpha=PYTIM_ALPHA, normal="z", molecular=False,
+        max_layers=3, radii_dict=BIOCHAR_RADII, include_zero_radius=True,
+    )
 
-    z_contact = contact_biochar.positions[:, 2]
-    z_mid = biochar.center_of_mass()[2]
-    lower_contact = z_contact[z_contact < z_mid]
-    upper_contact = z_contact[z_contact > z_mid]
-    if lower_contact.size == 0 or upper_contact.size == 0:
-        raise ValueError("Could not identify both biochar surfaces in this frame.")
+def add_bonded_hydrogens(universe, biochar_ag, surface_ag, cutoff_nm=0.12):
+    """Add H atoms bonded to surface C/O that ITIM may still miss."""
+    heavy = surface_ag.select_atoms("name C* O*")
+    hydrogens = biochar_ag.select_atoms("name H*")
+    if heavy.n_atoms == 0 or hydrogens.n_atoms == 0:
+        return surface_ag
+    d = distances.distance_array(heavy.positions, hydrogens.positions, box=universe.dimensions)
+    bonded_h = hydrogens[np.any(d < cutoff_nm, axis=0)]
+    idx = np.unique(np.concatenate([surface_ag.indices, bonded_h.indices]))
+    return biochar_ag[np.isin(biochar_ag.indices, idx)]
 
-    lower_surface_z = lower_contact.max()
-    upper_surface_z = upper_contact.min()
+# Union of layer-1 atoms over equilibrated frames (atoms on either face at any point)
+surface_indices = set()
+for ts in u.trajectory[1500:]:   # from 30 ns onward; adjust to your equilibration point
+    run_itim(u, biochar)
+    surface = biochar[biochar.layers == SURFACE_LAYER]
+    surface = add_bonded_hydrogens(u, biochar, surface)
+    surface_indices.update(surface.indices)
 
-    dz_to_surface = np.minimum(np.abs(com_solute[:, 2] - lower_surface_z),
-                               np.abs(com_solute[:, 2] - upper_surface_z))
-    adsorbed = np.sum(dz_to_surface < adsorption_cutoff)
-    adsorbed_counts.append(adsorbed)
+surface_atoms = biochar[np.isin(biochar.indices, list(surface_indices))]
+print(f"ITIM surface atoms: {surface_atoms.n_atoms}")
 
-print(f"Mean adsorbed molecules: {np.mean(adsorbed_counts):.1f} ± {np.std(adsorbed_counts):.1f}")
+# Write a GROMACS index group for reuse (e.g. gmx rdf -n surface_ITIM.ndx)
+with open("surface_ITIM.ndx", "w") as f:
+    f.write("[ surface ]\n")
+    gmx_ids = [a.index + 1 for a in surface_atoms]
+    for i in range(0, len(gmx_ids), 15):
+        f.write(" ".join(str(x) for x in gmx_ids[i:i + 15]) + "\n")
 ```
 
-This gives you the mean number of adsorbed molecules, from which you can calculate adsorption per unit surface area using the solvent accessible surface area of the biochar (calculated with `gmx sasa`). The contact cutoff used to identify the surface atoms is only for locating the two interfaces; the adsorption cutoff should still be chosen from the relevant solute-surface structural feature, such as the first RDF peak.
+#### Step 2 — Count adsorbed solute molecules
+
+For each frame, compute the minimum distance from each solute COM to any ITIM surface atom. Because the biochar slab is periodic in xy but not through the vacuum gap in z, use minimum-image convention in the xy-plane only (set `box[2] = 0` for distance routines).
+
+```python
+import MDAnalysis as mda
+import numpy as np
+from MDAnalysis.lib import distances
+
+u = mda.Universe("npt.tpr", "npt.xtc")
+solute = u.select_atoms("resname DCPAA")   # 2,4-D residue name
+
+# Load pre-computed ITIM surface indices (1-based GROMACS atom numbers)
+surface_ids = set()
+with open("surface_ITIM.ndx") as f:
+    in_group = False
+    for line in f:
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_group = line == "[ surface ]"
+        elif in_group and line:
+            surface_ids.update(int(x) for x in line.split())
+
+surface_atoms = u.atoms[[a.index + 1 in surface_ids for a in u.atoms]]
+
+ADSORPTION_CUTOFF_NM = 0.6   # from solute–surface C RDF first peak
+
+def analysis_box(box):
+    """Periodic in xy; direct z (no wrap through vacuum)."""
+    b = np.asarray(box, dtype=float).copy()
+    b[2] = 0.0
+    return b
+
+def com_dist_to_surface(com, surface_pos, box):
+    com = np.asarray(com, dtype=float).reshape(1, 3)
+    d = distances.distance_array(com, surface_pos, box=analysis_box(box))
+    return float(d.min())
+
+adsorbed_counts = []
+for ts in u.trajectory[1500:]:
+    box = u.dimensions
+    surf_pos = surface_atoms.positions
+    n_ads = 0
+    for res in solute.residues:
+        com = res.atoms.center_of_mass()
+        if com_dist_to_surface(com, surf_pos, box) < ADSORPTION_CUTOFF_NM:
+            n_ads += 1
+    adsorbed_counts.append(n_ads)
+
+print(f"Mean adsorbed molecules: {np.mean(adsorbed_counts):.1f} ± {np.std(adsorbed_counts):.1f}")
+print(f"Mean adsorbed fraction: {100 * np.mean(adsorbed_counts) / solute.n_residues:.1f}%")
+```
+
+This gives the mean number (and fraction) of adsorbed molecules over the equilibrated window. Divide by the solvent-accessible surface area of the biochar (from `gmx sasa`; see [Building Biochar Molecular Models from Scratch](biochar_model_building_tutorial.md), Section 7.3) to obtain adsorption per unit area. Choose the adsorption cutoff from the relevant solute–surface RDF — for 2,4-D aromatic ring to surface carbon, 0.6 nm is appropriate; other solutes may need a different value (our atrazine work used 0.85 nm).
 
 ---
 
@@ -364,7 +440,8 @@ The number of atoms in your `.gro` file does not match what is listed in the `[ 
 There is likely a severe steric clash in the starting configuration. Do not ignore and proceed to the next step! Open the output `.gro` of the last minimisation step in VMD and look for atoms that are sitting on top of each other. The most common cause is solute molecules placed inside the biochar material by `gmx insert-molecules`. Re-run `gmx insert-molecules` with a smaller number of molecules, or verify the vdW exclusions are working correctly.
 
 **Simulation crashes immediately with a "LINCS warning"**
-Hydrogen bonds are flying apart. This usually means the timestep is too large for the current geometry, or that there is still a clash. Try running a brief NVT step (constant volume, no pressure coupling) at a very short timestep (0.5 fs) before the full NPT run to let the system relax.
+Hydrogen bonds are flying apart. This usually means the timestep is too large for the current geometry, or that there is still a clash. Try running a brief NVT step (constant volume, no pressure coupling) at a very short timest
+ep (0.5 fs) before the full NPT run to let the system relax.
 
 **No adsorption visible after 5 ns**
 This is usually just insufficient simulation time. Equilibration in these systems takes 30+ ns. Run longer. 
@@ -406,6 +483,9 @@ Convergence analysis:
 
 6. Degiacomi MT, Tian S, Greenwell HC & Erastova V. *DynDen: Assessing convergence of molecular dynamics simulations of interfaces.* Computer Physics Communications 269 (2021). DOI: [10.1016/j.cpc.2021.108126](https://doi.org/10.1016/j.cpc.2021.108126)
 
+PyTIM:
+
+7. Sega M, Hantal G, Fábián B & Jedlovszky P. *Pytim: A python package for the interfacial analysis of molecular simulations.* Journal of Computational Chemistry 39(25), 2118–2125 (2018). DOI: [10.1002/jcc.25384](https://doi.org/10.1002/jcc.25384). Documentation: [marcello-sega.github.io/pytim](https://marcello-sega.github.io/pytim/)
 
 **GitHub repositories (Erastova group):**
 
