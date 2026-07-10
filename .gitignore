@@ -1,0 +1,14 @@
+# Ignore macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Ignore Microsoft Word files
+*.doc
+*.docx
+*.docm
+
+# Ignore Microsoft Excel files
+*.xls
+*.xlsx
+*.xlsm

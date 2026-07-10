@@ -168,7 +168,7 @@ For larger or more unusual structures, PolyParGen ([polypargen.com](http://polyp
 
 After downloading the assigned structures and force field files:
 1. Run a brief energy minimisation on the single molecule to resolve any internal strain from the 2D → 3D coordinate conversion (use `gmx editconf`, ensure that your simulation box is 2x the cut-off and run minimisation with the standard steepest-descent protocol)
-2. Check the output structure in VMD (or your preferd visualisation software) — it should look chemically sensible
+2. Check the output structure in VMD (or your preferred visualisation software) — it should look chemically sensible
 
 If the molecule comes out badly distorted after minimisation, the topology may have an incorrect dihedral or angle parameter. Re-examine the structure in MarvinSketch and check that bond orders are drawn correctly, then re-upload.
 
@@ -305,6 +305,8 @@ dt              = 0.001        ; 1 fs (BC400); 0.0005 (BC600/BC800)
 tcoupl          = V-rescale
 tc-grps         = System
 tau-t           = 0.1
+ref-t           = 1000         
+
 
 ; Annealing: hold at high T for 10 ns, then ramp to 300 K by 20 ns, hold
 annealing       = single
@@ -376,7 +378,7 @@ After annealing, equilibrate at atmospheric conditions:
 ```ini
 ; npt_eq.mdp — Room-temperature equilibration
 integrator      = md
-nsteps          = 10000000     ; 10 ns
+nsteps          = 10000000     ; 20 ns
 dt              = 0.002        ; 2 fs (system is now compact, stable, standard cond)
 
 tcoupl          = V-rescale
@@ -533,21 +535,21 @@ gmx energy -f npt_eq.edr -o density.xvg  # select Density
 
 ```
 
-The free volume fraction is reported as $V_{\text{free}}$, the true density is then:
+Knowing the free volume fraction $V_{\text{free}}$ ($ \frac {V_{\text{free}}[nm^3]}{V_{\text{total}}[nm^3]} $), we can calculate the true density as:
 
 $$ \rho_{\text{true}} = \frac{\rho_{\text{sim box}}}{1 - V_{\text{free}}} $$
-
 
 
 Compare this to your experimental target. If it falls within the confidence interval — good, proceed to the next check. If it is too low, your building blocks are packing inefficiently (often because of too much curvature or too many bulky arm groups). If it is too high, your aromatic cores are too large and packing too tightly.
 
 **The key structural lever for density is aromatic domain size.** Wood et al. characterised a logarithmic relationship between core size (in rings) and condensed-phase true density. Larger cores → higher density. Use this to make targeted adjustments: if density is 5% below target, try building blocks with moderately larger aromatic domains.
 
+
 ### 6.2 Check 2 — Simulated TEM
 
 Generate a simulated transmission electron microscopy (TEM) image. This provides a visual, qualitative check of whether the model morphology matches experimental HR-TEM images of real biochars.
 
-GROMACS includes `gmx spatial`, but simulated TEMs are better generated with a simple projection approach in Python using MDAnalysis:
+GROMACS includes `gmx spatial`, but simulated TEMs are better generated with a simple projection approach in Python using MDAnalysis, as given here, or with specialised tools like [computem](https://github.com/ejkirkland/computem) or [abTEM](https://github.com/abTEM/abTEM).
 
 ```python
 import MDAnalysis as mda
@@ -585,7 +587,7 @@ If your model looks too ordered (regular fringes) for a low-temperature biochar,
 
 ### 6.3 Validate porosity (for VA system)
 
-After removing VAs and running equilibration, measure the pore size distribution using the `gmx freevolume` tool with a range of probe radii (or with a dedicated pore-analysis tool). The `gmx freevolume` tool reports free volume at a given probe radius; by comparing free volumes at different probe sizes you can reconstruct a pore size distribution. Alternatively, the Zeo++ software (zeoplusplus.org) provides more sophisticated pore-geometry analysis and is compatible with GROMACS output structures. Compare the resulting pore size distribution to your experimental target.
+After removing VAs and running equilibration, measure the pore size distribution using the `gmx freevolume` tool with a range of probe radii (or with a dedicated pore-analysis tool). The `gmx freevolume` tool reports free volume at a given probe radius; by comparing free volumes at different probe sizes, you can reconstruct a pore size distribution. Alternatively, the Zeo++ software (zeoplusplus.org) provides more sophisticated pore-geometry analysis and is compatible with GROMACS output structures. Compare the resulting pore size distribution to your experimental target.
 
 
 ### 6.4 The iteration decision
@@ -626,9 +628,9 @@ where [X] and [Y] are the x and y dimensions of your converged bulk model. The b
 ### 7.2 Equilibrate the surface
 
 ```ini
-; surf_eq.mdp — Surface equilibration
+; surf_eq_NPT.mdp — Surface equilibration 
 integrator      = md
-nsteps          = 10000000     ; 10 ns
+nsteps          = 10000000     ; 20 ns
 dt              = 0.002
 
 tcoupl          = V-rescale
@@ -640,7 +642,7 @@ ref-t           = 300
 pcoupl          = c-rescale ; previously Berendsen 
 pcoupltype      = semiisotropic
 tau-p           = 1.0
-ref-p           = 1.0  1.0     ; xy pressure, z pressure
+ref-p           = 1.0  0     ; xy pressure, z pressure = 0, i.e. z is fixed
 compressibility = 4.5e-5  0    ; allow xy to relax; fix z
 
 cutoff-scheme   = Verlet
@@ -651,7 +653,7 @@ pbc             = xyz
 constraints     = h-bonds
 ```
 
-Semi-isotropic coupling is essential here. The xy-plane (parallel to the surface) can relax freely, while z (perpendicular) is fixed — you do not want the vacuum gap to disappear.
+When running NPT of the material interface, semi-isotropic coupling is essential! The xy-plane (parallel to the surface) can relax freely, while z (perpendicular) is fixed — you do not want the vacuum gap to disappear.
 
 
 ### 7.3 Characterise the surface
@@ -666,7 +668,7 @@ gmx sasa -f surf_eq.xtc -s surf_eq.tpr -o sasa.xvg -probe 0.18 -surface resname 
 Typically, experiments report SASA per weight (m² g⁻¹). While it is possible to calculate this for our models, this measurement will be meaningless, as one can easily double up the amount of bulk biochar along z-axis, influencing this number. Instead, we should report the normalised SASA, $nSASA$:
 
 
-$$ nSASA = SASA_{0.18} / (2 × A_{\text{xy}}) $$
+$$ nSASA = \frac { SASA_{0.18} } { (2 × A_{\text{xy}})} $$
 
 where $A_{\text{xy}}$ is the cross-sectional area of the simulation box in the xy-plane. A completely flat surface returns $nSASA$ = 1; real biochar surfaces are rough and should return $nSASA$ > 1. The trend with HTT should be upward: higher temperature biochars are more porous and have higher normalised SASAs. If yours follows this trend, the surface model is ready.
 
@@ -682,13 +684,13 @@ The most common cause is a bad initial packing — two molecules overlapping aft
 Either the aromatic cores are too small, there are too many non-hexagonal rings, or the high-pressure phase was not long enough. Try increasing the annealing pressure from 1000 bar to 2000 bar, or use a longer hold time at high temperature before beginning the cooling ramp.
 
 **Density converges far above target**
-Aromatic cores are too large and stacking too well. Use smaller, or more structurally diverse building blocks. Introduce some non-hexagonal rings.
+Aromatic cores are too large and stacking too well. Use smaller or more structurally diverse building blocks. Introduce some non-hexagonal rings.
 
 **Simulated TEM shows needle-like crystals**
 The building blocks are too uniform in size and packing too regularly. Use a broader mixture of building block sizes. This is especially common with BC800-type models — large, flat graphitic molecules readily form crystallites.
 
 **LigParGen returns parameters for some atoms as `opls_xxx` with question marks**
-LigParGen cannot assign parameters to unusual or highly strained bonding environments. Check the structure: unusual ring fusions, highly strained angles, or implicit valence errors in the `.mol` file are the usual cause. Re-draw the problematic region in MarvinSketch with explicit hydrogens and correct bond orders.
+LigParGen cannot assign parameters to unusual or highly strained bonding environments. Check the structure: unusual ring fusions, highly strained angles, or implicit valence errors in the `.mol` file are the usual cause. Redraw the problematic region in MarvinSketch with explicit hydrogens and correct bond orders.
 
 **VAs disappear during annealing (found in unexpected positions)**
 If VAs drift through the condensing material rather than being held in place by repulsion, $\epsilon$ is too small. Switch from V10-9 to V10-6 (increase $\epsilon$ by a factor of 1000 for a much stiffer repulsion).
