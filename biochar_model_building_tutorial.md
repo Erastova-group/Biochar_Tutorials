@@ -535,7 +535,7 @@ gmx energy -f npt_eq.edr -o density.xvg  # select Density
 
 ```
 
-Knowing the free volume fraction $V_{\text{free}}$ ($ \frac {V_{\text{free}}[nm^3]}{V_{\text{total}}[nm^3]} $), we can calculate the true density as:
+Knowing the free volume fraction $V_{\text{free}}$ (${V_{\text{free}}[nm^3]}\{V_{\text{total}}[nm^3]}$), we can calculate the true density as:
 
 $$ \rho_{\text{true}} = \frac{\rho_{\text{sim box}}}{1 - V_{\text{free}}} $$
 
